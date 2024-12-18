@@ -1,10 +1,9 @@
 import discord
-from discord import app_commands
+from discord import app_commands, Webhook
 from discord.ext import commands
 from googletrans import Translator
 import asyncio
 
-# Language options with flags
 LANGUAGES = {
     "en": "🇺🇸 English",
     "fr": "🇫🇷 French",
@@ -16,52 +15,84 @@ LANGUAGES = {
     "ja": "🇯🇵 Japanese",
     "ko": "🇰🇷 Korean",
     "zh": "🇨🇳 Chinese",
-    "hi": "🇮🇳 Hindi" 
+    "hi": "🇮🇳 Hindi",
+    "ar": "🇸🇦 Arabic"
 }
 
+class UserSettings:
+    def __init__(self):
+        self.target_lang = None
+        self.output_lang = None
+        self.auto_translate = False
+
+    def is_ready(self):
+        return all([self.target_lang, self.output_lang, self.auto_translate])
+
 class LanguageSelect(discord.ui.Select):
-    def __init__(self, bot):
+    def __init__(self, bot, setting_type, placeholder):
         self.bot = bot
+        self.setting_type = setting_type
         options = [
             discord.SelectOption(
                 label=lang_name.split(" ")[1],
                 value=lang_code,
-                emoji=lang_name.split(" ")[0],
-                description=f"Set your language to {lang_name.split(' ')[1]}"
+                emoji=lang_name.split(" ")[0]
             ) for lang_code, lang_name in LANGUAGES.items()
         ]
-        super().__init__(
-            placeholder="Select your language",
-            min_values=1,
-            max_values=1,
-            options=options
-        )
+        super().__init__(placeholder=placeholder, options=options)
 
     async def callback(self, interaction: discord.Interaction):
-        lang_code = self.values[0]
-        self.bot.user_languages[str(interaction.user.id)] = lang_code
-        await interaction.response.send_message(
-            f"✅ Your language has been set to: {LANGUAGES[lang_code]}",
-            ephemeral=True
+        user_id = str(interaction.user.id)
+        if user_id not in self.bot.user_settings:
+            self.bot.user_settings[user_id] = UserSettings()
+
+        settings = self.bot.user_settings[user_id]
+        if self.setting_type == "target":
+            settings.target_lang = self.values[0]
+        else:
+            settings.output_lang = self.values[0]
+
+        content = "Current Settings:\n"
+        content += f"• Input Language: {LANGUAGES.get(settings.target_lang, 'Not set')}\n"
+        content += f"• Output Language: {LANGUAGES.get(settings.output_lang, 'Not set')}\n"
+        content += f"• Auto-Translation: {'ON' if settings.auto_translate else 'OFF'}"
+
+        await interaction.response.edit_message(content=content, view=self.view)
+
+class AutoTranslateButton(discord.ui.Button):
+    def __init__(self, bot):
+        super().__init__(
+            style=discord.ButtonStyle.danger,
+            label="Auto-Translation: OFF"
         )
-
-class LanguageView(discord.ui.View):
-    def __init__(self, bot):
-        super().__init__(timeout=None)
-        self.add_item(LanguageSelect(bot))
-
-class TranslatorCog(commands.Cog):
-    def __init__(self, bot):
         self.bot = bot
+
+    async def callback(self, interaction: discord.Interaction):
+        user_id = str(interaction.user.id)
+        if user_id not in self.bot.user_settings:
+            self.bot.user_settings[user_id] = UserSettings()
+
+        settings = self.bot.user_settings[user_id]
+        settings.auto_translate = not settings.auto_translate
         
-    @app_commands.command(name="language", description="Select your preferred language for translations")
-    async def language(self, interaction: discord.Interaction):
-        """Select your preferred language for translations"""
-        await interaction.response.send_message(
-            "Select your preferred language:",
-            view=LanguageView(self.bot),
-            ephemeral=True
-        )
+        self.label = f"Auto-Translation: {'ON' if settings.auto_translate else 'OFF'}"
+        self.style = discord.ButtonStyle.success if settings.auto_translate else discord.ButtonStyle.danger
+
+        content = "Current Settings:\n"
+        content += f"• Input Language: {LANGUAGES.get(settings.target_lang, 'Not set')}\n"
+        content += f"• Output Language: {LANGUAGES.get(settings.output_lang, 'Not set')}\n"
+        content += f"• Auto-Translation: {'ON' if settings.auto_translate else 'OFF'}"
+
+        await interaction.response.edit_message(content=content, view=self.view)
+
+class SettingsView(discord.ui.View):
+    def __init__(self, bot, user_id):
+        super().__init__()
+        self.bot = bot
+        self.user_id = user_id
+        self.add_item(LanguageSelect(bot, "target", "Select input language"))
+        self.add_item(LanguageSelect(bot, "output", "Select output language"))
+        self.add_item(AutoTranslateButton(bot))
 
 class TranslatorBot(commands.Bot):
     def __init__(self):
@@ -70,70 +101,111 @@ class TranslatorBot(commands.Bot):
         intents.members = True
         super().__init__(command_prefix='!', intents=intents)
         self.translator = Translator()
-        self.user_languages = {}
+        self.user_settings = {}
 
     async def setup_hook(self):
-        print("Setting up commands...")
-        
-        # Create context menu command for translation
+        @self.tree.command(name="settings", description="Configure your translation settings")
+        async def settings(interaction: discord.Interaction):
+            user_id = str(interaction.user.id)
+            if user_id not in self.user_settings:
+                self.user_settings[user_id] = UserSettings()
+            
+            view = SettingsView(self, user_id)
+            settings = self.user_settings[user_id]
+            
+            content = "Configure your translation settings:"
+            if settings.target_lang or settings.output_lang:
+                content = "Current Settings:\n"
+                content += f"• Input Language: {LANGUAGES.get(settings.target_lang, 'Not set')}\n"
+                content += f"• Output Language: {LANGUAGES.get(settings.output_lang, 'Not set')}\n"
+                content += f"• Auto-Translation: {'ON' if settings.auto_translate else 'OFF'}"
+            
+            await interaction.response.send_message(content=content, view=view, ephemeral=True)
+
         @self.tree.context_menu(name='Translate Message')
         async def translate_message(interaction: discord.Interaction, message: discord.Message):
-            await self.handle_translation(interaction, message)
+            user_id = str(interaction.user.id)
+            if user_id not in self.user_settings:
+                await interaction.response.send_message(
+                    "⚠️ Please set your language first using /settings",
+                    ephemeral=True
+                )
+                return
 
-        # Add the cog with slash commands
-        await self.add_cog(TranslatorCog(self))
+            settings = self.user_settings[user_id]
+            if not settings.target_lang:
+                await interaction.response.send_message(
+                    "⚠️ Please set your target language using /settings",
+                    ephemeral=True
+                )
+                return
 
-        try:
-            print("Syncing commands...")
-            await self.tree.sync()
-            print("Commands synced successfully!")
-        except Exception as e:
-            print(f"Error during sync: {e}")
+            try:
+                translation = self.translator.translate(
+                    message.content,
+                    dest=settings.target_lang
+                )
+                
+                embed = discord.Embed(
+                    title="🔄 Translation",
+                    description=translation.text,
+                    color=0x3498db
+                )
+                embed.set_footer(text=f"{translation.src} → {settings.target_lang}")
+                
+                await interaction.response.send_message(
+                    embed=embed,
+                    ephemeral=True
+                )
+                
+            except Exception as e:
+                await interaction.response.send_message(
+                    f"❌ Translation error: {str(e)}",
+                    ephemeral=True
+                )
 
-    async def handle_translation(self, interaction: discord.Interaction, message: discord.Message):
-        user_id = str(interaction.user.id)
-        if user_id not in self.user_languages:
-            await interaction.response.send_message(
-                "⚠️ Please set your language first using /language",
-                ephemeral=True
-            )
+        await self.tree.sync()
+        print("Commands synchronized!")
+
+    async def on_message(self, message):
+        if message.author.bot:
             return
 
-        target_lang = self.user_languages[user_id]
-        try:
-            translation = self.translator.translate(
-                message.content,
-                dest=target_lang
-            )
-            
-            embed = discord.Embed(
-                title="🔄 Translation",
-                description=translation.text,
-                color=0x3498db
-            )
-            embed.set_footer(text=f"{translation.src} → {target_lang}")
-            
-            await interaction.response.send_message(
-                embed=embed,
-                ephemeral=True
-            )
-            
-        except Exception as e:
-            await interaction.response.send_message(
-                f"❌ Translation error: {str(e)}",
-                ephemeral=True
-            )
+        user_id = str(message.author.id)
+        if user_id not in self.user_settings:
+            return
 
-# Bot setup and launch
+        settings = self.user_settings[user_id]
+        if not settings.is_ready():
+            return
+
+        try:
+            detected = self.translator.detect(message.content)
+            if detected.lang == settings.target_lang:
+                # Traduire d'abord
+                translation = await asyncio.to_thread(
+                    self.translator.translate,
+                    message.content,
+                    dest=settings.output_lang
+                )
+
+                webhook = await message.channel.create_webhook(name="TranslatorBot")
+                try:
+                    await message.delete()
+                    
+                    await webhook.send(
+                        content=translation.text,
+                        username=message.author.display_name,
+                        avatar_url=message.author.display_avatar.url
+                    )
+                finally:
+                    await webhook.delete()
+
+        except Exception as e:
+            print(f"Translation error: {e}")
+
 bot = TranslatorBot()
 
-@bot.event
-async def on_ready():
-    print(f'Bot logged in as {bot.user.name}')
-    print("Bot is ready! Use /language to set your preferred language.")
-    print(f"Invite URL: https://discord.com/api/oauth2/authorize?client_id={bot.user.id}&permissions=2048&scope=bot%20applications.commands")
-
-# Replace with your Discord token
 TOKEN = 'YOUR_TOKEN_HERE'
 
 if __name__ == '__main__':
